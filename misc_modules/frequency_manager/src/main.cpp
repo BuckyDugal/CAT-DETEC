@@ -12,6 +12,7 @@
 #include <utils/freq_formatting.h>
 #include <gui/dialogs/dialog_box.h>
 #include <fstream>
+#include <filesystem>
 #include <unordered_map>
 #include "utils/wstr.h"
 #include "frequency_manager.h"
@@ -1055,6 +1056,21 @@ MOD_EXPORT void _INIT_() {
     def["scanner"]["noiseFloor"] = -120.0f;
     def["scanner"]["signalMarginDb"] = 6.0f;
     def["scanner"]["squelchEnabled"] = false;
+
+    // CAT-DETEC: on first run, seed the user's frequency list with the bundled
+    // Boischatel presets (installed in the resources directory). Never overwrite
+    // an existing user file.
+    {
+        std::string userPath = std::string(core::getRoot()) + "/frequency_manager_config.json";
+        std::error_code ec;
+        if (!std::filesystem::exists(userPath, ec)) {
+            std::string bundledPath = std::string(core::getResourcesDirectory()) + "/frequency_manager_config.json";
+            if (std::filesystem::exists(bundledPath, ec)) {
+                std::filesystem::copy_file(bundledPath, userPath, ec);
+                if (!ec) { flog::info("FrequencyManager: seeded user presets from bundled Boischatel list"); }
+            }
+        }
+    }
 
     config.setPath(std::string(core::getRoot()) + "/frequency_manager_config.json");
     config.load(def);

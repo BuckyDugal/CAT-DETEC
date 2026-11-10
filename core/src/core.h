@@ -17,6 +17,7 @@ namespace core {
     SDRPP_EXPORT ModuleComManager modComManager;
     SDRPP_EXPORT CommandArgsParser args;
     SDRPP_EXPORT const char *getRoot();
+    SDRPP_EXPORT const char *getResourcesDirectory();
 
     void setInputSampleRate(double samplerate, double bandwidth = 0.0);
 
