@@ -65,12 +65,14 @@ public:
         if (_playing) return;
         _stream->setSampleRate(DEFAULT_SAMPLE_RATE);
         _playing = true;
+        stereoPacker.out.clearReadStop();
         stereoPacker.start();
     }
 
     void stop() {
         if (!_playing) return;
         _playing = false;
+        stereoPacker.out.stopReader();
         stereoPacker.stop();
     }
 
@@ -87,6 +89,7 @@ public:
             config.acquire();
             config.conf[_streamName]["device"] = _deviceName;
             config.release(true);
+            _deviceChanged = true;
         }
 
         // Add test sine wave toggle
@@ -128,7 +131,7 @@ private:
         pa_context_connect(_paContext, NULL, PA_CONTEXT_NOFLAGS, NULL);
 
         // Start mainloop in separate thread
-        std::thread paThread(&PulseAudioSink::paThreadFunc, this);
+        _paThread = std::thread(&PulseAudioSink::paThreadFunc, this);
 
         // Wait for context to be ready
         while (_running && pa_context_get_state(_paContext) != PA_CONTEXT_READY) {
@@ -155,17 +158,38 @@ private:
 
         if(!createStream(_paContext)) {
             flog::error("Failed to create PulseAudio stream");
+            if (_mainloop) {
+                pa_mainloop_quit(_mainloop, 0);
+            }
+            if (_paThread.joinable()) {
+                _paThread.join();
+            }
             return;
         }
 
         // Main audio loop
         while (_running) {
+            if (_deviceChanged.exchange(false)) {
+                if (_paStream) {
+                    pa_stream_disconnect(_paStream);
+                    pa_stream_unref(_paStream);
+                    _paStream = nullptr;
+                }
+                createStream(_paContext);
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
             // Let packer process data
         }
 
-        // Clean up
+        // Clean up: stop the mainloop thread FIRST (it owns dispatch),
+        // only then touch pa_* objects.
+        if (_mainloop) {
+            pa_mainloop_quit(_mainloop, 0);
+        }
+        if (_paThread.joinable()) {
+            _paThread.join();
+        }
         if (_paStream) {
             pa_stream_disconnect(_paStream);
             pa_stream_unref(_paStream);
@@ -180,8 +204,10 @@ private:
     }
 
     void sendSilence(pa_stream* s, size_t length) {
-        void* data;
-        pa_stream_begin_write(s, &data, &length);
+        void* data = nullptr;
+        if (pa_stream_begin_write(s, &data, &length) < 0 || !data) {
+            return;
+        }
         memset(data, 0, length);
         pa_stream_write(s, data, length, NULL, 0, PA_SEEK_RELATIVE);
     }
@@ -239,13 +265,16 @@ private:
 
              pa_stream_set_write_callback(_paStream, [](pa_stream* s, size_t length, void* userdata) {
                 PulseAudioSink* _this = static_cast<PulseAudioSink*>(userdata);
-                //int available = _this->stereoPacker.out.isDataReady() ? _this->stereoPacker.out.read() : -1;
+                // Never block the mainloop thread: if the packer has no
+                // buffer ready, write silence instead (mirrors audio_sink).
+                if (!_this->stereoPacker.out.isDataReady()) {
+                    _this->sendSilence(s, length);
+                    return;
+                }
                 int available = _this->stereoPacker.out.read();
 
-                // flog::info("Write callback triggered, requesting {} bytes", length);
                 if(available < 0) {
-                    // flog::warn("No data available in packer buffer");
-                    // _this->sendSilence(s, 1 * sizeof(dsp::stereo_t));
+                    _this->sendSilence(s, length);
                     return;
                 }
                 void* data;
@@ -296,7 +325,9 @@ private:
 
     std::atomic<bool> _running{false};
     std::atomic<bool> _playing{false};
+    std::atomic<bool> _deviceChanged{false};
     std::thread _audioThread;
+    std::thread _paThread;
 
     std::mutex _audioMutex;
     std::vector<dsp::stereo_t> _audioBuffer;
